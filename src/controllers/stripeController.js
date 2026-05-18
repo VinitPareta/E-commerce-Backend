@@ -1,6 +1,8 @@
 const asyncHandler = require("express-async-handler");
 const Stripe = require("stripe");
 const Order = require("../models/Order");
+const User = require("../models/User");
+const { sendPaymentSuccessEmail } = require("../utils/email");
 
 const getStripe = () => {
   const secret = process.env.STRIPE_SECRET_KEY;
@@ -17,7 +19,7 @@ const getClientOrigin = (req) => {
   const origin = process.env.CLIENT_URL || req.headers.origin;
   if (!origin) {
     const err = new Error(
-      "Client origin is missing. Set CLIENT_URL or ensure request origin is provided."
+      "Client origin is missing.Set CLIENT_URL or ensure request origin is provided.",
     );
     err.statusCode = 500;
     throw err;
@@ -25,9 +27,78 @@ const getClientOrigin = (req) => {
   return origin;
 };
 
-// @desc    Create Stripe Checkout Session for an existing DS order
-// @route   POST /api/payments/stripe/session
-// @access  Private
+const getStripeWebhookSecret = () => {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) {
+    const err = new Error(
+      "Stripe webhook secret is missing (STRIPE_WEBHOOK_SECRET)",
+    );
+    err.statusCode = 500;
+    throw err;
+  }
+  return secret;
+};
+
+//Stripe webhook endpoint with signature validation
+//POST /api/payments/stripe/webhook
+//Public
+const stripeWebhook = asyncHandler(async (req, res) => {
+  const stripe = getStripe();
+  const signature = req.headers["stripe-signature"];
+  if (!signature) {
+    res.status(400);
+    throw new Error("Missing Stripe signature header");
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      signature,
+      getStripeWebhookSecret(),
+    );
+  } catch (err) {
+    res.status(400);
+    throw new Error(
+      `Stripe webhook signature verification failed: ${err.message}`,
+    );
+  }
+
+  const session = event.data.object;
+  const orderId = session?.metadata?.dsOrderId || session?.client_reference_id;
+
+  if (event.type === "checkout.session.completed" && orderId) {
+    const order = await Order.findById(orderId);
+    if (order && !order.isPaid) {
+      order.isPaid = true;
+      order.paidAt = Date.now();
+      order.paymentStatus = "Paid";
+      order.status = "Complete";
+      order.paymentResult = {
+        provider: "stripe",
+        orderId: session.payment_intent || session.id,
+        paymentId: session.payment_intent || session.id,
+        signature: signature,
+      };
+      await order.save();
+
+      const user = await User.findById(order.user).select("name email");
+      if (user?.email) {
+        await sendPaymentSuccessEmail({
+          to: user.email,
+          order,
+          recipientName:
+            user.name || order.shippingAddress.fullName || "Customer",
+        });
+      }
+    }
+  }
+  return res.status(200).json({ received: true });
+});
+
+// Create Stripe Checkout Session for an existing DS order
+// POST /api/payments/stripe/session
+// Private
 const createStripeCheckoutSession = asyncHandler(async (req, res) => {
   const { orderId } = req.body;
   if (!orderId) {
@@ -91,9 +162,9 @@ const createStripeCheckoutSession = asyncHandler(async (req, res) => {
   res.json({ success: true, url: session.url, sessionId: session.id });
 });
 
-// @desc    Verify Stripe session and mark order paid
-// @route   POST /api/payments/stripe/verify
-// @access  Private
+//Verify Stripe session and mark order paid
+//POST /api/payments/stripe/verify
+//Private
 const verifyStripeSession = asyncHandler(async (req, res) => {
   const { orderId, sessionId } = req.body;
   if (!orderId || !sessionId) {
@@ -146,6 +217,7 @@ const verifyStripeSession = asyncHandler(async (req, res) => {
 
   order.isPaid = true;
   order.paidAt = Date.now();
+  order.paymentStatus = "Paid";
   order.status = "Complete";
   order.paymentResult = {
     provider: "stripe",
@@ -155,7 +227,19 @@ const verifyStripeSession = asyncHandler(async (req, res) => {
   };
 
   const updated = await order.save();
+
+  await sendPaymentSuccessEmail({
+    to: req.user.email,
+    order: updated,
+    recipientName:
+      req.user.name || order.shippingAddress.fullName || "Customer",
+  });
+
   res.json({ success: true, order: updated });
 });
 
-module.exports = { createStripeCheckoutSession, verifyStripeSession };
+module.exports = {
+  createStripeCheckoutSession,
+  verifyStripeSession,
+  stripeWebhook,
+};

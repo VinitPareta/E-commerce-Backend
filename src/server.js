@@ -17,6 +17,7 @@ const userRoutes = require("./routes/userRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const uploadRoutes = require("./routes/uploadRoutes");
 const paymentRoutes = require("./routes/paymentRoutes");
+const { stripeWebhook } = require("./controllers/stripeController");
 
 connectDB();
 
@@ -53,6 +54,12 @@ app.use(
 );
 
 app.options("*", cors());
+
+app.post(
+  "/api/payments/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  stripeWebhook,
+);
 
 // ✅ Body parsers
 app.use(express.json({ limit: "10mb" }));

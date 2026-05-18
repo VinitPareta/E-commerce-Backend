@@ -1,8 +1,8 @@
-const asyncHandler = require('express-async-handler');
-const Order = require('../models/Order');
-const Product = require('../models/Product');
-const Cart = require('../models/Cart');
-const User = require('../models/User');
+const asyncHandler = require("express-async-handler");
+const Order = require("../models/Order");
+const Product = require("../models/Product");
+const Cart = require("../models/Cart");
+const User = require("../models/User");
 
 // @desc    Create new order
 // @route   POST /api/orders
@@ -11,14 +11,14 @@ const createOrder = asyncHandler(async (req, res) => {
   const {
     items,
     shippingAddress,
-    paymentMethod = 'COD',
+    paymentMethod = "COD",
     shippingPrice = 0,
     taxPrice = 0,
   } = req.body;
 
   if (!items || items.length === 0) {
     res.status(400);
-    throw new Error('No order items');
+    throw new Error("No order items");
   }
 
   // Verify and snapshot items from DB to prevent tampering
@@ -44,11 +44,11 @@ const createOrder = asyncHandler(async (req, res) => {
     orderItems.push({
       product: product._id,
       name: product.name,
-      image: product.images?.[0] || '',
+      image: product.images?.[0] || "",
       price,
       quantity: it.quantity,
-      size: it.size || '',
-      color: it.color || '',
+      size: it.size || "",
+      color: it.color || "",
     });
 
     product.stock -= it.quantity;
@@ -59,6 +59,9 @@ const createOrder = asyncHandler(async (req, res) => {
   const totalPrice =
     Number(itemsPrice) + Number(shippingPrice) + Number(taxPrice);
 
+  const isFreeOrder = Number(totalPrice) <= 0;
+  const paymentStatus = isFreeOrder ? "No Payment Required" : "Unpaid";
+
   const order = await Order.create({
     user: req.user._id,
     items: orderItems,
@@ -68,9 +71,10 @@ const createOrder = asyncHandler(async (req, res) => {
     shippingPrice,
     taxPrice,
     totalPrice,
-    // Card/UPI are paid only after Razorpay verification
-    isPaid: false,
-    paidAt: null,
+    isPaid: isFreeOrder,
+    paidAt: isFreeOrder ? Date.now() : null,
+    paymentStatus,
+    status: isFreeOrder ? "Complete" : "Pending",
   });
 
   if (shippingAddress) {
@@ -95,7 +99,9 @@ const createOrder = asyncHandler(async (req, res) => {
 // @route   GET /api/orders/me  (and GET /api/orders/myorders — same handler)
 // @access  Private
 const getMyOrders = asyncHandler(async (req, res) => {
-  const orders = await Order.find({ user: req.user._id }).sort({ createdAt: -1 });
+  const orders = await Order.find({ user: req.user._id }).sort({
+    createdAt: -1,
+  });
   res.json({ success: true, count: orders.length, orders });
 });
 
@@ -104,23 +110,23 @@ const getMyOrders = asyncHandler(async (req, res) => {
 // @access  Private
 const getOrderById = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  if (id === 'me' || id === 'myorders') {
+  if (id === "me" || id === "myorders") {
     res.status(404);
-    throw new Error('Order not found');
+    throw new Error("Order not found");
   }
 
-  const order = await Order.findById(id).populate('user', 'name email');
+  const order = await Order.findById(id).populate("user", "name email");
   if (!order) {
     res.status(404);
-    throw new Error('Order not found');
+    throw new Error("Order not found");
   }
 
   if (
     order.user._id.toString() !== req.user._id.toString() &&
-    req.user.role !== 'admin'
+    req.user.role !== "admin"
   ) {
     res.status(403);
-    throw new Error('Not authorized to view this order');
+    throw new Error("Not authorized to view this order");
   }
 
   res.json({ success: true, order });
@@ -131,7 +137,7 @@ const getOrderById = asyncHandler(async (req, res) => {
 // @access  Private/Admin
 const getAllOrders = asyncHandler(async (req, res) => {
   const orders = await Order.find({})
-    .populate('user', 'name email')
+    .populate("user", "name email")
     .sort({ createdAt: -1 });
   res.json({ success: true, count: orders.length, orders });
 });
@@ -144,14 +150,28 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id);
   if (!order) {
     res.status(404);
-    throw new Error('Order not found');
+    throw new Error("Order not found");
   }
   order.status = status || order.status;
-  if (status === 'Delivered') {
+  if (status === "Delivered") {
     order.deliveredAt = Date.now();
     order.isPaid = true;
     order.paidAt = order.paidAt || Date.now();
+    order.paymentStatus = "Paid";
   }
+
+  if (status === "Refund Pending") {
+    order.paymentStatus = "Refund Pending";
+    order.refundRequestedAt = Date.now();
+  }
+
+  if (status === "Refunded") {
+    order.paymentStatus = "Refunded";
+    order.refundedAt = Date.now();
+    order.isPaid = true;
+    order.status = "Refunded";
+  }
+
   const updated = await order.save();
   res.json({ success: true, order: updated });
 });

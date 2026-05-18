@@ -1,13 +1,16 @@
-const asyncHandler = require('express-async-handler');
-const crypto = require('crypto');
-const Razorpay = require('razorpay');
-const Order = require('../models/Order');
+const asyncHandler = require("express-async-handler");
+const crypto = require("crypto");
+const Razorpay = require("razorpay");
+const Order = require("../models/Order");
+const { sendPaymentSuccessEmail } = require("../utils/email");
 
 const getRazorpayInstance = () => {
   const key_id = process.env.RAZORPAY_KEY_ID;
   const key_secret = process.env.RAZORPAY_KEY_SECRET;
   if (!key_id || !key_secret) {
-    const err = new Error('Razorpay keys are missing (RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET)');
+    const err = new Error(
+      "Razorpay keys are missing (RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET)",
+    );
     err.statusCode = 500;
     throw err;
   }
@@ -21,25 +24,25 @@ const createRazorpayOrder = asyncHandler(async (req, res) => {
   const { orderId } = req.body;
   if (!orderId) {
     res.status(400);
-    throw new Error('orderId is required');
+    throw new Error("orderId is required");
   }
 
   const order = await Order.findById(orderId);
   if (!order) {
     res.status(404);
-    throw new Error('Order not found');
+    throw new Error("Order not found");
   }
   if (order.user.toString() !== req.user._id.toString()) {
     res.status(403);
-    throw new Error('Not authorized');
+    throw new Error("Not authorized");
   }
   if (order.isPaid) {
     res.status(400);
-    throw new Error('Order already paid');
+    throw new Error("Order already paid");
   }
-  if (!['Card', 'UPI'].includes(order.paymentMethod)) {
+  if (!["Card", "UPI"].includes(order.paymentMethod)) {
     res.status(400);
-    throw new Error('Razorpay is only allowed for Card/UPI');
+    throw new Error("Razorpay is only allowed for Card/UPI");
   }
 
   const razorpay = getRazorpayInstance();
@@ -50,7 +53,7 @@ const createRazorpayOrder = asyncHandler(async (req, res) => {
   try {
     rpOrder = await razorpay.orders.create({
       amount,
-      currency: 'INR',
+      currency: "INR",
       receipt: `ds_${order._id.toString()}`,
       notes: { dsOrderId: order._id.toString() },
     });
@@ -59,7 +62,7 @@ const createRazorpayOrder = asyncHandler(async (req, res) => {
       e?.error?.description ||
       e?.error?.message ||
       e?.message ||
-      'Unable to create Razorpay order';
+      "Unable to create Razorpay order";
     res.status(500);
     throw new Error(details);
   }
@@ -69,7 +72,7 @@ const createRazorpayOrder = asyncHandler(async (req, res) => {
     keyId: process.env.RAZORPAY_KEY_ID,
     razorpayOrder: rpOrder,
     amount,
-    currency: 'INR',
+    currency: "INR",
   });
 });
 
@@ -77,54 +80,74 @@ const createRazorpayOrder = asyncHandler(async (req, res) => {
 // @route   POST /api/payments/razorpay/verify
 // @access  Private
 const verifyRazorpayPayment = asyncHandler(async (req, res) => {
-  const { orderId, razorpay_order_id, razorpay_payment_id, razorpay_signature } =
-    req.body;
+  const {
+    orderId,
+    razorpay_order_id,
+    razorpay_payment_id,
+    razorpay_signature,
+  } = req.body;
 
-  if (!orderId || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+  if (
+    !orderId ||
+    !razorpay_order_id ||
+    !razorpay_payment_id ||
+    !razorpay_signature
+  ) {
     res.status(400);
-    throw new Error('Missing required Razorpay fields');
+    throw new Error("Missing required Razorpay fields");
   }
 
   const order = await Order.findById(orderId);
   if (!order) {
     res.status(404);
-    throw new Error('Order not found');
+    throw new Error("Order not found");
   }
   if (order.user.toString() !== req.user._id.toString()) {
     res.status(403);
-    throw new Error('Not authorized');
+    throw new Error("Not authorized");
   }
   if (order.isPaid) {
-    if (['Card', 'UPI'].includes(order.paymentMethod) && order.status === 'Pending') {
-      order.status = 'Complete';
+    if (
+      ["Card", "UPI"].includes(order.paymentMethod) &&
+      order.status === "Pending"
+    ) {
+      order.status = "Complete";
       await order.save();
     }
     return res.json({ success: true, order });
   }
 
   const expected = crypto
-    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+    .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
     .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-    .digest('hex');
+    .digest("hex");
 
   if (expected !== razorpay_signature) {
     res.status(400);
-    throw new Error('Payment verification failed');
+    throw new Error("Payment verification failed");
   }
 
   order.isPaid = true;
   order.paidAt = Date.now();
-  order.status = 'Complete';
+  order.paymentStatus = "Paid";
+  order.status = "Complete";
   order.paymentResult = {
-    provider: 'razorpay',
+    provider: "razorpay",
     orderId: razorpay_order_id,
     paymentId: razorpay_payment_id,
     signature: razorpay_signature,
   };
 
   const updated = await order.save();
+
+  await sendPaymentSuccessEmail({
+    to: req.user.email,
+    order: updated,
+    recipientName:
+      req.user.name || order.shippingAddress.fullName || "Customer",
+  });
+
   res.json({ success: true, order: updated });
 });
 
 module.exports = { createRazorpayOrder, verifyRazorpayPayment };
-
