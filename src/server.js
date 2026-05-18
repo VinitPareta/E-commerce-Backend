@@ -24,8 +24,9 @@ const app = express();
 
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || '*',
+    origin: process.env.CLIENT_URL || true,
     credentials: true,
+    optionsSuccessStatus: 200,
   })
 );
 app.use(express.json({ limit: '10mb' }));

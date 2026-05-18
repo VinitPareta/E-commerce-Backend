@@ -13,10 +13,16 @@ const getStripe = () => {
 };
 
 const getClientOrigin = (req) => {
-  // Prefer explicit CLIENT_URL, fall back to request origin
-  return (
-    process.env.CLIENT_URL || req.headers.origin || "http://localhost:5173"
-  );
+  // Prefer explicit CLIENT_URL, then request origin.
+  const origin = process.env.CLIENT_URL || req.headers.origin;
+  if (!origin) {
+    const err = new Error(
+      "Client origin is missing. Set CLIENT_URL or ensure request origin is provided."
+    );
+    err.statusCode = 500;
+    throw err;
+  }
+  return origin;
 };
 
 // @desc    Create Stripe Checkout Session for an existing DS order
