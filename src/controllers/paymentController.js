@@ -139,13 +139,16 @@ const verifyRazorpayPayment = asyncHandler(async (req, res) => {
   };
 
   const updated = await order.save();
-
-  await sendPaymentSuccessEmail({
-    to: req.user.email,
-    order: updated,
-    recipientName:
-      req.user.name || order.shippingAddress.fullName || "Customer",
-  });
+  try {
+    await sendPaymentSuccessEmail({
+      to: req.user.email,
+      customerName: req.user.name || order.shippingAddress.fullName || "Customer",
+      order: updated,
+      paymentMode: order.paymentMethod,
+    });
+  } catch (emailError) {
+    console.error("Payment confirmation email error:", emailError.message);
+  }
 
   res.json({ success: true, order: updated });
 });

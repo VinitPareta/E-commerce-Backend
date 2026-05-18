@@ -41,7 +41,7 @@ const getStripeWebhookSecret = () => {
 
 //Stripe webhook endpoint with signature validation
 //POST /api/payments/stripe/webhook
-//Public
+//Public 
 const stripeWebhook = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const signature = req.headers["stripe-signature"];
@@ -57,7 +57,7 @@ const stripeWebhook = asyncHandler(async (req, res) => {
       signature,
       getStripeWebhookSecret(),
     );
-  } catch (err) {
+  } catch (err){
     res.status(400);
     throw new Error(
       `Stripe webhook signature verification failed: ${err.message}`,
@@ -72,7 +72,7 @@ const stripeWebhook = asyncHandler(async (req, res) => {
     if (order && !order.isPaid) {
       order.isPaid = true;
       order.paidAt = Date.now();
-      order.paymentStatus = "Paid";
+      order.paymentStatus = 'Paid';
       order.status = "Complete";
       order.paymentResult = {
         provider: "stripe",
@@ -80,16 +80,17 @@ const stripeWebhook = asyncHandler(async (req, res) => {
         paymentId: session.payment_intent || session.id,
         signature: signature,
       };
-      await order.save();
-
-      const user = await User.findById(order.user).select("name email");
-      if (user?.email) {
+      const updated = await order.save();
+      try {
+        const user = await User.findById(order.user);
         await sendPaymentSuccessEmail({
-          to: user.email,
-          order,
-          recipientName:
-            user.name || order.shippingAddress.fullName || "Customer",
+          to: user?.email,
+          customerName: user?.name || order.shippingAddress.fullName || "Customer",
+          order: updated,
+          paymentMode: order.paymentMethod,
         });
+      } catch (emailError) {
+        console.error("Stripe webhook payment confirmation email error:", emailError.message);
       }
     }
   }
@@ -217,7 +218,7 @@ const verifyStripeSession = asyncHandler(async (req, res) => {
 
   order.isPaid = true;
   order.paidAt = Date.now();
-  order.paymentStatus = "Paid";
+  order.paymentStatus = 'Paid';
   order.status = "Complete";
   order.paymentResult = {
     provider: "stripe",
@@ -227,13 +228,16 @@ const verifyStripeSession = asyncHandler(async (req, res) => {
   };
 
   const updated = await order.save();
-
-  await sendPaymentSuccessEmail({
-    to: req.user.email,
-    order: updated,
-    recipientName:
-      req.user.name || order.shippingAddress.fullName || "Customer",
-  });
+  try {
+    await sendPaymentSuccessEmail({
+      to: req.user.email,
+      customerName: req.user.name || order.shippingAddress.fullName || "Customer",
+      order: updated,
+      paymentMode: order.paymentMethod,
+    });
+  } catch (emailError) {
+    console.error("Stripe payment confirmation email error:", emailError.message);
+  }
 
   res.json({ success: true, order: updated });
 });

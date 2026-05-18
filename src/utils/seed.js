@@ -14,9 +14,9 @@ const users = [
     role: "admin",
   },
   {
-    name: "yop",
-    email: "alt.x2-9oqp89mc@yopmail.com",
-    password: "yop1234",
+    name: "John Doe",
+    email: "john@example.com",
+    password: "john1234",
     role: "user",
   },
   {
@@ -256,7 +256,7 @@ const seedDatabase = async () => {
   );
   console.log("Login credentials:");
   console.log("  Admin: admin@dsstore.com / admin123");
-  console.log("  User:  alt.x2-9oqp89mc@yopmail.com / yop1234");
+  console.log("  User:  john@example.com  / john1234");
 };
 
 const destroyDatabase = async () => {
