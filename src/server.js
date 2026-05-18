@@ -1,22 +1,22 @@
-const path = require('path');
-const fs = require('fs');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-const express = require('express');
-const cors = require('cors');
-const morgan = require('morgan');
+const path = require("path");
+const fs = require("fs");
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+const express = require("express");
+const cors = require("cors");
+const morgan = require("morgan");
 
-const connectDB = require('./config/db');
-const { notFound, errorHandler } = require('./middleware/errorMiddleware');
+const connectDB = require("./config/db");
+const { notFound, errorHandler } = require("./middleware/errorMiddleware");
 
-const authRoutes = require('./routes/authRoutes');
-const productRoutes = require('./routes/productRoutes');
-const cartRoutes = require('./routes/cartRoutes');
-const wishlistRoutes = require('./routes/wishlistRoutes');
-const orderRoutes = require('./routes/orderRoutes');
-const userRoutes = require('./routes/userRoutes');
-const adminRoutes = require('./routes/adminRoutes');
-const uploadRoutes = require('./routes/uploadRoutes');
-const paymentRoutes = require('./routes/paymentRoutes');
+const authRoutes = require("./routes/authRoutes");
+const productRoutes = require("./routes/productRoutes");
+const cartRoutes = require("./routes/cartRoutes");
+const wishlistRoutes = require("./routes/wishlistRoutes");
+const orderRoutes = require("./routes/orderRoutes");
+const userRoutes = require("./routes/userRoutes");
+const adminRoutes = require("./routes/adminRoutes");
+const uploadRoutes = require("./routes/uploadRoutes");
+const paymentRoutes = require("./routes/paymentRoutes");
 
 connectDB();
 
@@ -27,53 +27,56 @@ app.use(
     origin: process.env.CLIENT_URL || true,
     credentials: true,
     optionsSuccessStatus: 200,
-  })
+  }),
 );
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-if (process.env.NODE_ENV !== 'production') {
-  app.use(morgan('dev'));
+if (process.env.NODE_ENV !== "production") {
+  app.use(morgan("dev"));
 }
 
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
-app.get('/', (req, res) => {
+app.get("/", (req, res) => {
   res.json({
     success: true,
-    message: 'DS Store backend is running. Use /api for API endpoints.',
+    message: "DS Store backend is running. Use /api for API endpoints.",
   });
 });
 
-app.get('/api', (req, res) => {
+app.get("/api", (req, res) => {
   res.json({
     success: true,
-    message: 'DS Store API is running',
-    version: '1.0.0',
+    message: "DS Store API is running",
+    version: "1.0.0",
   });
 });
+app.get("/", (req, res) => {
+  res.send("Backend Running Successfully");
+});
 
-app.use('/api/auth', authRoutes);
-app.use('/api/products', productRoutes);
-app.use('/api/cart', cartRoutes);
-app.use('/api/wishlist', wishlistRoutes);
-app.use('/api/orders', orderRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/upload', uploadRoutes);
-app.use('/api/payments', paymentRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/products", productRoutes);
+app.use("/api/cart", cartRoutes);
+app.use("/api/wishlist", wishlistRoutes);
+app.use("/api/orders", orderRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/admin", adminRoutes);
+app.use("/api/upload", uploadRoutes);
+app.use("/api/payments", paymentRoutes);
 
 // Serve built React app (when SERVE_CLIENT=true). Used for single-port
 // production-style serving (e.g. behind a tunnel, on Render, etc.).
-const clientDist = path.join(__dirname, '..', '..', 'client', 'dist');
-if (process.env.SERVE_CLIENT === 'true' && fs.existsSync(clientDist)) {
+const clientDist = path.join(__dirname, "..", "..", "client", "dist");
+if (process.env.SERVE_CLIENT === "true" && fs.existsSync(clientDist)) {
   console.log(`Serving React build from: ${clientDist}`);
   app.use(express.static(clientDist));
-  app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) {
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api") || req.path.startsWith("/uploads")) {
       return next();
     }
-    res.sendFile(path.join(clientDist, 'index.html'));
+    res.sendFile(path.join(clientDist, "index.html"));
   });
 }
 
