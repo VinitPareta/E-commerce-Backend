@@ -26,9 +26,50 @@ app.use(
   cors({
     origin: process.env.CLIENT_URL || true,
     credentials: true,
-    optionsSuccessStatus: 200,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Origin',
+      'X-Requested-With',
+      'Content-Type',
+      'Accept',
+      'Authorization',
+    ],
+    optionsSuccessStatus: 204,
+  })
+);
+app.options(
+  '*',
+  cors({
+    origin: process.env.CLIENT_URL || true,
+    credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Origin',
+      'X-Requested-With',
+      'Content-Type',
+      'Accept',
+      'Authorization',
+    ],
   }),
 );
+app.use((req, res, next) => {
+  const requestOrigin = req.headers.origin || process.env.CLIENT_URL || '*';
+  res.header('Access-Control-Allow-Origin', requestOrigin);
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header(
+    'Access-Control-Allow-Methods',
+    'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+  );
+  res.header(
+    'Access-Control-Allow-Headers',
+    req.headers['access-control-request-headers'] ||
+      'Origin, X-Requested-With, Content-Type, Accept, Authorization',
+  );
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
