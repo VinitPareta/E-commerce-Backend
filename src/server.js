@@ -38,6 +38,13 @@ if (process.env.NODE_ENV !== 'production') {
 
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'DS Store backend is running. Use /api for API endpoints.',
+  });
+});
+
 app.get('/api', (req, res) => {
   res.json({
     success: true,
