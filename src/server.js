@@ -22,54 +22,39 @@ connectDB();
 
 const app = express();
 
+// ✅ CLEAN CORS SETUP
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://e-commerce-frontend-gilt-eight.vercel.app",
+  process.env.CLIENT_URL,
+].filter(Boolean);
+
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || true,
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS blocked: ${origin}`));
+      }
+    },
     credentials: true,
-    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: [
-      'Origin',
-      'X-Requested-With',
-      'Content-Type',
-      'Accept',
-      'Authorization',
-    ],
-    optionsSuccessStatus: 204,
-  })
-);
-app.options(
-  '*',
-  cors({
-    origin: process.env.CLIENT_URL || true,
-    credentials: true,
-    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-    allowedHeaders: [
-      'Origin',
-      'X-Requested-With',
-      'Content-Type',
-      'Accept',
-      'Authorization',
+      "Origin",
+      "X-Requested-With",
+      "Content-Type",
+      "Accept",
+      "Authorization",
     ],
   }),
 );
-app.use((req, res, next) => {
-  const requestOrigin = req.headers.origin || process.env.CLIENT_URL || '*';
-  res.header('Access-Control-Allow-Origin', requestOrigin);
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header(
-    'Access-Control-Allow-Methods',
-    'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
-  );
-  res.header(
-    'Access-Control-Allow-Headers',
-    req.headers['access-control-request-headers'] ||
-      'Origin, X-Requested-With, Content-Type, Accept, Authorization',
-  );
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
-  }
-  next();
-});
+
+app.options("*", cors());
+
+// ✅ Body parsers
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -79,10 +64,11 @@ if (process.env.NODE_ENV !== "production") {
 
 app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
+// ✅ Single root route
 app.get("/", (req, res) => {
   res.json({
     success: true,
-    message: "DS Store backend is running. Use /api for API endpoints.",
+    message: "DS Store backend is running.",
   });
 });
 
@@ -93,10 +79,8 @@ app.get("/api", (req, res) => {
     version: "1.0.0",
   });
 });
-app.get("/", (req, res) => {
-  res.send("Backend Running Successfully");
-});
 
+// ✅ All routes
 app.use("/api/auth", authRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/cart", cartRoutes);
@@ -107,8 +91,6 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use("/api/payments", paymentRoutes);
 
-// Serve built React app (when SERVE_CLIENT=true). Used for single-port
-// production-style serving (e.g. behind a tunnel, on Render, etc.).
 const clientDist = path.join(__dirname, "..", "..", "client", "dist");
 if (process.env.SERVE_CLIENT === "true" && fs.existsSync(clientDist)) {
   console.log(`Serving React build from: ${clientDist}`);
