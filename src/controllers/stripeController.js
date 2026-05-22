@@ -14,19 +14,6 @@ const getStripe = () => {
   return new Stripe(secret);
 };
 
-const getClientOrigin = (req) => {
-  // Prefer explicit CLIENT_URL, then request origin.
-  const origin = process.env.CLIENT_URL || req.headers.origin;
-  if (!origin) {
-    const err = new Error(
-      "Client origin is missing.Set CLIENT_URL or ensure request origin is provided.",
-    );
-    err.statusCode = 500;
-    throw err;
-  }
-  return origin;
-};
-
 const getStripeWebhookSecret = () => {
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
   if (!secret) {
@@ -39,9 +26,39 @@ const getStripeWebhookSecret = () => {
   return secret;
 };
 
-//Stripe webhook endpoint with signature validation
-//POST /api/payments/stripe/webhook
-//Public 
+// GET /api/payments/stripe/session/:sessionId
+// Returns the orderId stored in the Stripe session metadata
+// Private
+const getStripeSession = asyncHandler(async (req, res) => {
+  const { sessionId } = req.params;
+  if (!sessionId) {
+    res.status(400);
+    throw new Error("sessionId is required");
+  }
+
+  const stripe = getStripe();
+
+  let session;
+  try {
+    session = await stripe.checkout.sessions.retrieve(sessionId);
+  } catch (e) {
+    res.status(400);
+    throw new Error(
+      e?.raw?.message || e?.message || "Unable to retrieve Stripe session",
+    );
+  }
+
+  const orderId = session?.metadata?.dsOrderId || session?.client_reference_id;
+  if (!orderId) {
+    res.status(404);
+    throw new Error("Order ID not found in Stripe session");
+  }
+
+  res.json({ success: true, orderId });
+});
+
+// POST /api/payments/stripe/webhook
+// Public
 const stripeWebhook = asyncHandler(async (req, res) => {
   const stripe = getStripe();
   const signature = req.headers["stripe-signature"];
@@ -57,7 +74,7 @@ const stripeWebhook = asyncHandler(async (req, res) => {
       signature,
       getStripeWebhookSecret(),
     );
-  } catch (err){
+  } catch (err) {
     res.status(400);
     throw new Error(
       `Stripe webhook signature verification failed: ${err.message}`,
@@ -72,7 +89,7 @@ const stripeWebhook = asyncHandler(async (req, res) => {
     if (order && !order.isPaid) {
       order.isPaid = true;
       order.paidAt = Date.now();
-      order.paymentStatus = 'Paid';
+      order.paymentStatus = "Paid";
       order.status = "Complete";
       order.paymentResult = {
         provider: "stripe",
@@ -85,19 +102,23 @@ const stripeWebhook = asyncHandler(async (req, res) => {
         const user = await User.findById(order.user);
         await sendPaymentSuccessEmail({
           to: user?.email,
-          customerName: user?.name || order.shippingAddress.fullName || "Customer",
+          customerName:
+            user?.name || order.shippingAddress.fullName || "Customer",
           order: updated,
           paymentMode: order.paymentMethod,
         });
       } catch (emailError) {
-        console.error("Stripe webhook payment confirmation email error:", emailError.message);
+        console.error(
+          "Stripe webhook payment confirmation email error:",
+          emailError.message,
+        );
       }
     }
   }
+
   return res.status(200).json({ received: true });
 });
 
-// Create Stripe Checkout Session for an existing DS order
 // POST /api/payments/stripe/session
 // Private
 const createStripeCheckoutSession = asyncHandler(async (req, res) => {
@@ -126,7 +147,14 @@ const createStripeCheckoutSession = asyncHandler(async (req, res) => {
   }
 
   const stripe = getStripe();
-  const origin = getClientOrigin(req);
+
+  // Always use CLIENT_URL directly — never req.headers.origin
+  // This prevents the double-slash bug
+  const origin = (process.env.CLIENT_URL || "http://localhost:5173").replace(
+    /\/$/,
+    "",
+  );
+  console.log("ORIGIN IS:", origin);
 
   const payment_method_types =
     order.paymentMethod === "UPI" ? ["upi"] : ["card"];
@@ -150,7 +178,8 @@ const createStripeCheckoutSession = asyncHandler(async (req, res) => {
           },
         },
       ],
-      success_url: `${origin}/orders?stripe_order_id=${order._id.toString()}&stripe_session_id={CHECKOUT_SESSION_ID}`, //with order id and session id
+      //Stripe redirects here after payment — goes to new PaymentSuccess page
+      success_url: `${origin}/payment-successful?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin}/orders/${order._id.toString()}?stripe_cancelled=1`,
     });
   } catch (e) {
@@ -163,9 +192,8 @@ const createStripeCheckoutSession = asyncHandler(async (req, res) => {
   res.json({ success: true, url: session.url, sessionId: session.id });
 });
 
-//Verify Stripe session and mark order paid
-//POST /api/payments/stripe/verify
-//Private
+// POST /api/payments/stripe/verify
+// Private
 const verifyStripeSession = asyncHandler(async (req, res) => {
   const { orderId, sessionId } = req.body;
   if (!orderId || !sessionId) {
@@ -218,7 +246,7 @@ const verifyStripeSession = asyncHandler(async (req, res) => {
 
   order.isPaid = true;
   order.paidAt = Date.now();
-  order.paymentStatus = 'Paid';
+  order.paymentStatus = "Paid";
   order.status = "Complete";
   order.paymentResult = {
     provider: "stripe",
@@ -231,12 +259,16 @@ const verifyStripeSession = asyncHandler(async (req, res) => {
   try {
     await sendPaymentSuccessEmail({
       to: req.user.email,
-      customerName: req.user.name || order.shippingAddress.fullName || "Customer",
+      customerName:
+        req.user.name || order.shippingAddress.fullName || "Customer",
       order: updated,
       paymentMode: order.paymentMethod,
     });
   } catch (emailError) {
-    console.error("Stripe payment confirmation email error:", emailError.message);
+    console.error(
+      "Stripe payment confirmation email error:",
+      emailError.message,
+    );
   }
 
   res.json({ success: true, order: updated });
@@ -246,4 +278,5 @@ module.exports = {
   createStripeCheckoutSession,
   verifyStripeSession,
   stripeWebhook,
+  getStripeSession,
 };

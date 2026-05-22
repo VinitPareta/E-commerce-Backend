@@ -4,9 +4,9 @@ const Product = require("../models/Product");
 const Cart = require("../models/Cart");
 const User = require("../models/User");
 
-// @desc    Create new order
-// @route   POST /api/orders
-// @access  Private
+//Create new order
+//POST /api/orders
+// Private
 const createOrder = asyncHandler(async (req, res) => {
   const {
     items,
@@ -95,19 +95,33 @@ const createOrder = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, order });
 });
 
-// @desc    Get logged in user orders
-// @route   GET /api/orders/me  (and GET /api/orders/myorders — same handler)
-// @access  Private
+// Get logged in user orders
+// GET /api/orders/me  (and GET /api/orders/myorders — same handler)
+// Private
 const getMyOrders = asyncHandler(async (req, res) => {
-  const orders = await Order.find({ user: req.user._id }).sort({
-    createdAt: -1,
+  const page = Number(req.query.page) || 1;
+  const limit = Number(req.query.limit) || 5;
+  const skip = (page - 1) * limit;
+
+  const total = await Order.countDocuments({ user: req.user._id });
+
+  const orders = await Order.find({ user: req.user._id })
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit);
+
+  res.json({
+    success: true,
+    orders,
+    page,
+    totalPages: Math.ceil(total / limit),
+    totalOrders: total,
   });
-  res.json({ success: true, count: orders.length, orders });
 });
 
-// @desc    Get order by id
-// @route   GET /api/orders/:id
-// @access  Private
+//Get order by id
+//GET /api/orders/:id
+//Private
 const getOrderById = asyncHandler(async (req, res) => {
   const { id } = req.params;
   if (id === "me" || id === "myorders") {
@@ -132,9 +146,9 @@ const getOrderById = asyncHandler(async (req, res) => {
   res.json({ success: true, order });
 });
 
-// @desc    Get all orders (admin)
-// @route   GET /api/orders
-// @access  Private/Admin
+//Get all orders (admin)
+//GET /api/orders
+//Private/Admin
 const getAllOrders = asyncHandler(async (req, res) => {
   const orders = await Order.find({})
     .populate("user", "name email")
@@ -142,9 +156,9 @@ const getAllOrders = asyncHandler(async (req, res) => {
   res.json({ success: true, count: orders.length, orders });
 });
 
-// @desc    Update order status (admin)
-// @route   PUT /api/orders/:id/status
-// @access  Private/Admin
+//Update order status (admin)
+// PUT /api/orders/:id/status
+// Private/Admin
 const updateOrderStatus = asyncHandler(async (req, res) => {
   const { status } = req.body;
   const order = await Order.findById(req.params.id);
