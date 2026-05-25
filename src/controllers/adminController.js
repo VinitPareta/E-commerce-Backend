@@ -112,7 +112,7 @@ const getDashboardStats = asyncHandler(async (req, res) => {
     revenue: Math.round(revenue),
   }));
 
-  // Revenue Last 7 Days 
+  // Revenue Last 7 Days
   const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
   // Build array of last 7 days (oldest → today)
@@ -165,7 +165,7 @@ const getDashboardStats = asyncHandler(async (req, res) => {
     orders,
   }));
 
-  // Payment Methods breakdown 
+  // Payment Methods breakdown
   const paymentRaw = await Order.aggregate([
     { $group: { _id: "$paymentMethod", count: { $sum: 1 } } },
   ]);
@@ -245,5 +245,97 @@ const getAdminPayments = asyncHandler(async (req, res) => {
 
   res.json({ success: true, payments });
 });
+const getWebhookEvents = asyncHandler(async (req, res) => {
+  const Stripe = require("stripe");
+  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-module.exports = { getDashboardStats, getAdminPayments };
+  // Fetch ALL orders (paid + unpaid + cancelled)
+  const orders = await Order.find({})
+    .populate("user", "name email")
+    .sort({ createdAt: -1 });
+
+  const events = await Promise.all(
+    orders.map(async (order) => {
+      let failureReason = null;
+      let stripeStatus = null;
+
+      // For Card/UPI — fetch failure reason from Stripe
+      if (
+        ["Card", "UPI"].includes(order.paymentMethod) &&
+        order.paymentResult?.paymentId
+      ) {
+        try {
+          const paymentIntent = await stripe.paymentIntents.retrieve(
+            order.paymentResult.paymentId,
+          );
+          stripeStatus = paymentIntent.status;
+
+          if (paymentIntent.status !== "succeeded") {
+            const charge = paymentIntent.last_payment_error;
+            if (charge) {
+              failureReason = charge.message || charge.code || "Payment failed";
+            } else if (paymentIntent.status === "requires_payment_method") {
+              failureReason = "Insufficient funds or card declined";
+            } else if (paymentIntent.status === "canceled") {
+              failureReason = "Payment cancelled by user";
+            } else {
+              failureReason = paymentIntent.status;
+            }
+          }
+
+          // Check for underpaid/overpaid via charges
+          if (paymentIntent.status === "succeeded") {
+            const charges = await stripe.charges.list({
+              payment_intent: order.paymentResult.paymentId,
+              limit: 1,
+            });
+            const charge = charges.data[0];
+            if (charge) {
+              const amountPaid = charge.amount / 100;
+              const orderAmount = order.totalPrice;
+              if (amountPaid < orderAmount - 1) {
+                failureReason = `Underpaid — paid ₹${amountPaid} of ₹${orderAmount}`;
+                stripeStatus = "underpaid";
+              } else if (amountPaid > orderAmount + 1) {
+                failureReason = `Overpaid — paid ₹${amountPaid} of ₹${orderAmount}`;
+                stripeStatus = "overpaid";
+              }
+            }
+          }
+        } catch (err) {
+          failureReason = "Unable to fetch Stripe details";
+        }
+      }
+
+      // For COD
+      if (order.paymentMethod === "COD") {
+        if (order.status === "Cancelled") {
+          failureReason = "Order cancelled";
+        } else if (order.paymentStatus === "Unpaid" && order.isPaid === false) {
+          failureReason = "Awaiting cash payment on delivery";
+        }
+      }
+
+      return {
+        orderId: order._id,
+        shortId: order._id.toString().slice(-8).toUpperCase(),
+        customerName: order.user?.name || order.shippingAddress?.fullName,
+        customerEmail: order.user?.email || "—",
+        products: order.items.map((i) => i.name).join(", "),
+        amount: order.totalPrice,
+        paymentMethod: order.paymentMethod,
+        paymentStatus: order.paymentStatus,
+        orderStatus: order.status,
+        stripeStatus,
+        failureReason,
+        isPaid: order.isPaid,
+        createdAt: order.createdAt,
+        paidAt: order.paidAt || null,
+      };
+    }),
+  );
+
+  res.json({ success: true, events });
+});
+
+module.exports = { getDashboardStats, getAdminPayments, getWebhookEvents };
