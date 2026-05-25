@@ -1,419 +1,282 @@
 const asyncHandler = require("express-async-handler");
-const Product = require("../models/Product");
+const Stripe = require("stripe");
 const Order = require("../models/Order");
 const User = require("../models/User");
+const { sendPaymentSuccessEmail } = require("../utils/email");
 
-// ─── Simple in-memory cache ────────────────────────────────
-const cache = {
-  webhookEvents: null,
-  webhookEventsAt: 0,
-  TTL: 2 * 60 * 1000, // 2 minutes
+const getStripe = () => {
+  const secret = process.env.STRIPE_SECRET_KEY;
+  if (!secret) {
+    const err = new Error("Stripe secret key is missing (STRIPE_SECRET_KEY)");
+    err.statusCode = 500;
+    throw err;
+  }
+  return new Stripe(secret);
 };
 
-const isCacheValid = () =>
-  cache.webhookEvents !== null &&
-  Date.now() - cache.webhookEventsAt < cache.TTL;
-
-// Call this whenever an order is updated so cache refreshes
-const invalidateWebhookCache = () => {
-  cache.webhookEvents = null;
-  cache.webhookEventsAt = 0;
+const getStripeWebhookSecret = () => {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) {
+    const err = new Error(
+      "Stripe webhook secret is missing (STRIPE_WEBHOOK_SECRET)",
+    );
+    err.statusCode = 500;
+    throw err;
+  }
+  return secret;
 };
 
-// ─── Dashboard Stats ───────────────────────────────────────
-const getDashboardStats = asyncHandler(async (req, res) => {
-  const [
-    totalProducts,
-    totalOrders,
-    totalUsers,
-    revenueAgg,
-    recentOrders,
-    lowStock,
-  ] = await Promise.all([
-    Product.countDocuments(),
-    Order.countDocuments(),
-    User.countDocuments(),
-    Order.aggregate([
-      { $match: { status: { $ne: "Cancelled" } } },
-      { $group: { _id: null, total: { $sum: "$totalPrice" } } },
-    ]),
-    Order.find({})
-      .populate("user", "name email")
-      .sort({ createdAt: -1 })
-      .limit(5),
-    Product.find({ stock: { $lte: 5 } }).limit(5),
-  ]);
+// GET /api/payments/stripe/session/:sessionId
+// Returns the orderId stored in the Stripe session metadata
+// Private
+const getStripeSession = asyncHandler(async (req, res) => {
+  const { sessionId } = req.params;
+  if (!sessionId) {
+    res.status(400);
+    throw new Error("sessionId is required");
+  }
 
-  const ordersByStatus = await Order.aggregate([
-    { $group: { _id: "$status", count: { $sum: 1 } } },
-  ]);
+  const stripe = getStripe();
 
-  // Order Trend: last 6 months
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 5);
-  sixMonthsAgo.setDate(1);
-  sixMonthsAgo.setHours(0, 0, 0, 0);
+  let session;
+  try {
+    session = await stripe.checkout.sessions.retrieve(sessionId);
+  } catch (e) {
+    res.status(400);
+    throw new Error(
+      e?.raw?.message || e?.message || "Unable to retrieve Stripe session",
+    );
+  }
 
-  const orderTrendRaw = await Order.aggregate([
-    { $match: { createdAt: { $gte: sixMonthsAgo } } },
-    {
-      $group: {
-        _id: {
-          year: { $year: "$createdAt" },
-          month: { $month: "$createdAt" },
-          status: "$status",
-        },
-        count: { $sum: 1 },
-      },
-    },
-    { $sort: { "_id.year": 1, "_id.month": 1 } },
-  ]);
+  const orderId = session?.metadata?.dsOrderId || session?.client_reference_id;
+  if (!orderId) {
+    res.status(404);
+    throw new Error("Order ID not found in Stripe session");
+  }
 
-  const monthNames = [
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec",
-  ];
-  const trendMap = {};
-  orderTrendRaw.forEach(({ _id, count }) => {
-    const key = `${_id.year}-${_id.month}`;
-    if (!trendMap[key]) {
-      trendMap[key] = {
-        month: monthNames[_id.month - 1],
-        year: _id.year,
-        monthNum: _id.month,
-        total: 0,
-        completed: 0,
-        cancelled: 0,
+  res.json({ success: true, orderId });
+});
+
+// POST /api/payments/stripe/webhook
+// Public
+const stripeWebhook = asyncHandler(async (req, res) => {
+  const stripe = getStripe();
+  const signature = req.headers["stripe-signature"];
+  if (!signature) {
+    res.status(400);
+    throw new Error("Missing Stripe signature header");
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      signature,
+      getStripeWebhookSecret(),
+    );
+  } catch (err) {
+    res.status(400);
+    throw new Error(
+      `Stripe webhook signature verification failed: ${err.message}`,
+    );
+  }
+
+  const session = event.data.object;
+  const orderId = session?.metadata?.dsOrderId || session?.client_reference_id;
+
+  if (event.type === "checkout.session.completed" && orderId) {
+    const order = await Order.findById(orderId);
+    if (order && !order.isPaid) {
+      order.isPaid = true;
+      order.paidAt = Date.now();
+      order.paymentStatus = "Paid";
+      order.status = "Complete";
+      order.paymentResult = {
+        provider: "stripe",
+        orderId: session.payment_intent || session.id,
+        paymentId: session.payment_intent || session.id,
+        signature: signature,
       };
+      const updated = await order.save();
+      try {
+        const user = await User.findById(order.user);
+        await sendPaymentSuccessEmail({
+          to: user?.email,
+          customerName:
+            user?.name || order.shippingAddress.fullName || "Customer",
+          order: updated,
+          paymentMode: order.paymentMethod,
+        });
+      } catch (emailError) {
+        console.error(
+          "Stripe webhook payment confirmation email error:",
+          emailError.message,
+        );
+      }
     }
-    trendMap[key].total += count;
-    if (_id.status === "Complete" || _id.status === "Delivered")
-      trendMap[key].completed += count;
-    if (_id.status === "Cancelled") trendMap[key].cancelled += count;
-  });
-  const orderTrend = Object.values(trendMap).sort((a, b) =>
-    a.year !== b.year ? a.year - b.year : a.monthNum - b.monthNum,
-  );
-
-  // Revenue Trend: last 6 months
-  const revenueTrendRaw = await Order.aggregate([
-    {
-      $match: {
-        createdAt: { $gte: sixMonthsAgo },
-        status: { $ne: "Cancelled" },
-      },
-    },
-    {
-      $group: {
-        _id: { year: { $year: "$createdAt" }, month: { $month: "$createdAt" } },
-        revenue: { $sum: "$totalPrice" },
-      },
-    },
-    { $sort: { "_id.year": 1, "_id.month": 1 } },
-  ]);
-  const revenueTrend = revenueTrendRaw.map(({ _id, revenue }) => ({
-    month: monthNames[_id.month - 1],
-    revenue: Math.round(revenue),
-  }));
-
-  // Weekly Revenue: last 7 days
-  const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const last7 = [];
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    last7.push({
-      date: d.toISOString().slice(0, 10),
-      day: dayNames[d.getDay()],
-      revenue: 0,
-      orders: 0,
-    });
   }
-  const sevenDaysAgo = new Date();
-  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
-  sevenDaysAgo.setHours(0, 0, 0, 0);
-  const weeklyRaw = await Order.aggregate([
-    {
-      $match: {
-        createdAt: { $gte: sevenDaysAgo },
-        status: { $ne: "Cancelled" },
-      },
-    },
-    {
-      $group: {
-        _id: {
-          date: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+
+  return res.status(200).json({ received: true });
+});
+
+// POST /api/payments/stripe/session
+// Private
+const createStripeCheckoutSession = asyncHandler(async (req, res) => {
+  const { orderId } = req.body;
+  if (!orderId) {
+    res.status(400);
+    throw new Error("orderId is required");
+  }
+
+  const order = await Order.findById(orderId);
+  if (!order) {
+    res.status(404);
+    throw new Error("Order not found");
+  }
+  if (order.user.toString() !== req.user._id.toString()) {
+    res.status(403);
+    throw new Error("Not authorized");
+  }
+  if (order.isPaid) {
+    res.status(400);
+    throw new Error("Order already paid");
+  }
+  if (!["Card", "UPI"].includes(order.paymentMethod)) {
+    res.status(400);
+    throw new Error("Stripe is only allowed for Card/UPI");
+  }
+
+  const stripe = getStripe();
+
+  // Always use CLIENT_URL directly — never req.headers.origin
+  // This prevents the double-slash bug
+  const origin = (process.env.CLIENT_URL || "http://localhost:5173").replace(
+    /\/$/,
+    "",
+  );
+  console.log("ORIGIN IS:", origin);
+
+  const payment_method_types =
+    order.paymentMethod === "UPI" ? ["upi"] : ["card"];
+
+  let session;
+  try {
+    session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types,
+      client_reference_id: order._id.toString(),
+      metadata: { dsOrderId: order._id.toString() },
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency: "inr",
+            unit_amount: Math.round(Number(order.totalPrice) * 100),
+            product_data: {
+              name: `DS Store Order ${order._id.toString().slice(-8).toUpperCase()}`,
+            },
+          },
         },
-        revenue: { $sum: "$totalPrice" },
-        orders: { $sum: 1 },
-      },
-    },
-  ]);
-  weeklyRaw.forEach(({ _id, revenue, orders }) => {
-    const slot = last7.find((d) => d.date === _id.date);
-    if (slot) {
-      slot.revenue = Math.round(revenue);
-      slot.orders = orders;
-    }
-  });
-  const weeklyRevenue = last7.map(({ day, revenue, orders }) => ({
-    day,
-    revenue,
-    orders,
-  }));
-
-  // Payment Methods
-  const paymentRaw = await Order.aggregate([
-    { $group: { _id: "$paymentMethod", count: { $sum: 1 } } },
-  ]);
-  const totalTxns = paymentRaw.reduce((s, p) => s + p.count, 0);
-  const colorMap = {
-    COD: { color: "#fb923c", label: "Cash on Delivery" },
-    Card: { color: "#6366f1", label: "Credit/Debit Card" },
-    UPI: { color: "#22d3ee", label: "UPI" },
-  };
-  const paymentMethods = paymentRaw
-    .map(({ _id, count }) => ({
-      label: colorMap[_id]?.label || _id,
-      value: count,
-      percent:
-        totalTxns > 0 ? parseFloat(((count / totalTxns) * 100).toFixed(1)) : 0,
-      color: colorMap[_id]?.color || "#94a3b8",
-    }))
-    .sort((a, b) => b.value - a.value);
-
-  // Order Status for gauge
-  const statusColorMap = {
-    Pending: "Pending",
-    Complete: "Completed",
-    Delivered: "Completed",
-    Processing: "Processing",
-    Shipped: "Processing",
-    Cancelled: "Cancelled",
-    Refunded: "Cancelled",
-  };
-  const gaugeMap = {};
-  ordersByStatus.forEach(({ _id, count }) => {
-    const group = statusColorMap[_id] || _id;
-    gaugeMap[group] = (gaugeMap[group] || 0) + count;
-  });
-  const orderStatus = Object.entries(gaugeMap).map(([name, value]) => ({
-    name,
-    value,
-  }));
-
-  res.json({
-    success: true,
-    stats: {
-      totalProducts,
-      totalOrders,
-      totalUsers,
-      totalRevenue: revenueAgg[0]?.total || 0,
-      ordersByStatus,
-      orderStatus,
-      orderTrend,
-      revenueTrend,
-      weeklyRevenue,
-      paymentMethods,
-      recentOrders,
-      lowStock,
-    },
-  });
-});
-
-// ─── Admin Payments ────────────────────────────────────────
-const getAdminPayments = asyncHandler(async (req, res) => {
-  const orders = await Order.find({ isPaid: true })
-    .populate("user", "name email")
-    .sort({ paidAt: -1 });
-
-  const payments = orders.map((order) => ({
-    orderId: order._id,
-    shortId: order._id.toString().slice(-8).toUpperCase(),
-    customerName: order.user?.name || order.shippingAddress.fullName,
-    customerEmail: order.user?.email || "—",
-    amount: order.totalPrice,
-    paymentMethod: order.paymentMethod,
-    paymentStatus: order.paymentStatus,
-    provider: order.paymentResult?.provider || "—",
-    transactionId:
-      order.paymentResult?.paymentId || order.paymentResult?.orderId || "—",
-    paidAt: order.paidAt,
-    orderStatus: order.status,
-  }));
-
-  res.json({ success: true, payments });
-});
-
-// ─── Webhook Events (with cache + optimised Stripe calls) ──
-const getWebhookEvents = asyncHandler(async (req, res) => {
-  // ── Serve from cache if still fresh ──
-  if (isCacheValid()) {
-    return res.json({
-      success: true,
-      events: cache.webhookEvents,
-      cached: true,
+      ],
+      //Stripe redirects here after payment — goes to new PaymentSuccess page
+      success_url: `${origin}/payment-successful?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${origin}/orders/${order._id.toString()}?stripe_cancelled=1`,
     });
+  } catch (e) {
+    const msg =
+      e?.raw?.message || e?.message || "Unable to create Stripe session";
+    res.status(500);
+    throw new Error(msg);
   }
 
-  const Stripe = require("stripe");
-  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  res.json({ success: true, url: session.url, sessionId: session.id });
+});
 
-  // Fetch all orders from DB in one query
-  const orders = await Order.find({})
-    .populate("user", "name email")
-    .sort({ createdAt: -1 });
+// POST /api/payments/stripe/verify
+// Private
+const verifyStripeSession = asyncHandler(async (req, res) => {
+  const { orderId, sessionId } = req.body;
+  if (!orderId || !sessionId) {
+    res.status(400);
+    throw new Error("orderId and sessionId are required");
+  }
 
-  // ── Batch-fetch Stripe data for UNPAID Card/UPI orders only ──
-  // Fetch last 100 payment intents and checkout sessions ONCE
-  // instead of one API call per order
-  let stripePaymentIntents = [];
-  let stripeCheckoutSessions = [];
-
-  const hasUnpaidCardOrders = orders.some(
-    (o) => !o.isPaid && ["Card", "UPI"].includes(o.paymentMethod),
-  );
-
-  if (hasUnpaidCardOrders) {
-    try {
-      // Fetch up to 100 recent payment intents in one call
-      const [piList, sessionList] = await Promise.all([
-        stripe.paymentIntents.list({ limit: 100 }),
-        stripe.checkout.sessions.list({ limit: 100 }),
-      ]);
-      stripePaymentIntents = piList.data || [];
-      stripeCheckoutSessions = sessionList.data || [];
-    } catch (err) {
-      console.error("Stripe batch fetch error:", err.message);
+  const order = await Order.findById(orderId);
+  if (!order) {
+    res.status(404);
+    throw new Error("Order not found");
+  }
+  if (order.user.toString() !== req.user._id.toString()) {
+    res.status(403);
+    throw new Error("Not authorized");
+  }
+  if (order.isPaid) {
+    if (
+      ["Card", "UPI"].includes(order.paymentMethod) &&
+      order.status === "Pending"
+    ) {
+      order.status = "Complete";
+      await order.save();
     }
+    return res.json({ success: true, order });
   }
 
-  // Build lookup maps for O(1) access
-  // Map: dsOrderId → paymentIntent
-  const piByOrderId = {};
-  stripePaymentIntents.forEach((pi) => {
-    if (pi.metadata?.dsOrderId) piByOrderId[pi.metadata.dsOrderId] = pi;
-  });
+  const stripe = getStripe();
 
-  // Map: dsOrderId → checkout session
-  const sessionByOrderId = {};
-  stripeCheckoutSessions.forEach((s) => {
-    const id = s.metadata?.dsOrderId || s.client_reference_id;
-    if (id) sessionByOrderId[id] = s;
-  });
+  let session;
+  try {
+    session = await stripe.checkout.sessions.retrieve(sessionId);
+  } catch (e) {
+    const msg =
+      e?.raw?.message || e?.message || "Unable to verify Stripe session";
+    res.status(400);
+    throw new Error(msg);
+  }
 
-  // ── Failure reason map ──
-  const reasonMap = {
-    insufficient_funds: "Insufficient funds",
-    card_declined: "Card declined",
-    lost_card: "Lost card — contact bank",
-    stolen_card: "Stolen card — contact bank",
-    expired_card: "Card expired",
-    incorrect_cvc: "Incorrect CVC",
-    incorrect_number: "Incorrect card number",
-    processing_error: "Processing error — try again",
-    do_not_honor: "Card blocked by bank",
-    do_not_try_again: "Card permanently blocked",
-    fraudulent: "Flagged as fraudulent",
-    generic_decline: "Card declined (generic)",
-    no_action_taken: "No action taken by bank",
-    not_permitted: "Transaction not permitted",
-    restricted_card: "Restricted card",
-    revocation_of_all_authorizations: "Card revoked",
-    security_violation: "Security violation",
-    service_not_allowed: "Service not allowed",
-    transaction_not_allowed: "Transaction not allowed",
-    try_again_later: "Try again later",
+  const dsOrderId =
+    session?.metadata?.dsOrderId || session?.client_reference_id;
+  if (dsOrderId !== order._id.toString()) {
+    res.status(400);
+    throw new Error("Stripe session does not match this order");
+  }
+  if (session.payment_status !== "paid") {
+    res.status(400);
+    throw new Error("Payment not completed");
+  }
+
+  order.isPaid = true;
+  order.paidAt = Date.now();
+  order.paymentStatus = "Paid";
+  order.status = "Complete";
+  order.paymentResult = {
+    provider: "stripe",
+    orderId: session.payment_intent || session.id,
+    paymentId: session.payment_intent || "",
+    signature: "",
   };
 
-  // ── Process each order synchronously (no more per-order API calls) ──
-  const events = orders.map((order) => {
-    let failureReason = null;
-    const oid = order._id.toString();
+  const updated = await order.save();
+  try {
+    await sendPaymentSuccessEmail({
+      to: req.user.email,
+      customerName:
+        req.user.name || order.shippingAddress.fullName || "Customer",
+      order: updated,
+      paymentMode: order.paymentMethod,
+    });
+  } catch (emailError) {
+    console.error(
+      "Stripe payment confirmation email error:",
+      emailError.message,
+    );
+  }
 
-    if (["Card", "UPI"].includes(order.paymentMethod)) {
-      if (!order.isPaid) {
-        // Look up in pre-fetched maps
-        const pi = piByOrderId[oid];
-        const session = sessionByOrderId[oid];
-
-        if (pi) {
-          if (pi.last_payment_error) {
-            const dc = pi.last_payment_error.decline_code;
-            const code = pi.last_payment_error.code;
-            if (dc && reasonMap[dc]) {
-              failureReason = reasonMap[dc];
-            } else if (code === "payment_intent_authentication_failure") {
-              failureReason = "Authentication failed (3D Secure)";
-            } else if (pi.last_payment_error.message) {
-              failureReason = pi.last_payment_error.message;
-            } else {
-              failureReason = dc || code || "Payment failed";
-            }
-          } else if (pi.status === "canceled") {
-            failureReason = "Payment cancelled by user";
-          } else if (pi.status === "requires_payment_method") {
-            failureReason = "Payment not completed";
-          } else if (pi.status === "requires_action") {
-            failureReason = "Awaiting 3D Secure authentication";
-          }
-        } else if (session) {
-          if (session.status === "expired") {
-            failureReason = "Checkout session expired";
-          } else {
-            failureReason = "Payment not attempted";
-          }
-        } else {
-          failureReason = "Checkout abandoned";
-        }
-      }
-    }
-
-    if (order.paymentMethod === "COD") {
-      if (order.status === "Cancelled") {
-        failureReason = "Order cancelled";
-      } else if (!order.isPaid) {
-        failureReason = "Awaiting cash payment on delivery";
-      }
-    }
-
-    return {
-      orderId: order._id,
-      shortId: oid.slice(-8).toUpperCase(),
-      customerName: order.user?.name || order.shippingAddress?.fullName,
-      customerEmail: order.user?.email || "—",
-      products: order.items.map((i) => i.name).join(", "),
-      amount: order.totalPrice,
-      paymentMethod: order.paymentMethod,
-      paymentStatus: order.paymentStatus,
-      orderStatus: order.status,
-      failureReason,
-      isPaid: order.isPaid,
-      createdAt: order.createdAt,
-      paidAt: order.paidAt || null,
-    };
-  });
-
-  // ── Store in cache ──
-  cache.webhookEvents = events;
-  cache.webhookEventsAt = Date.now();
-
-  res.json({ success: true, events });
+  res.json({ success: true, order: updated });
 });
 
 module.exports = {
-  getDashboardStats,
-  getAdminPayments,
-  getWebhookEvents,
-  invalidateWebhookCache,
+  createStripeCheckoutSession,
+  verifyStripeSession,
+  stripeWebhook,
+  getStripeSession,
 };
