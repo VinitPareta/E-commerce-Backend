@@ -258,81 +258,121 @@ const getWebhookEvents = asyncHandler(async (req, res) => {
       let failureReason = null;
       let stripeStatus = null;
 
-      // Card/UPI with successful payment — check for underpaid/overpaid
-      if (
-        ["Card", "UPI"].includes(order.paymentMethod) &&
-        order.isPaid &&
-        order.paymentResult?.paymentId
-      ) {
-        try {
-          const charges = await stripe.charges.list({
-            payment_intent: order.paymentResult.paymentId,
-            limit: 1,
-          });
-          const charge = charges.data[0];
-          if (charge) {
-            const amountPaid = charge.amount / 100;
-            const orderAmount = order.totalPrice;
-            if (amountPaid < orderAmount - 1) {
-              failureReason = `Underpaid — paid ₹${amountPaid} of ₹${orderAmount}`;
-            } else if (amountPaid > orderAmount + 1) {
-              failureReason = `Overpaid — paid ₹${amountPaid} of ₹${orderAmount}`;
-            }
-          }
-        } catch (err) {
-          // ignore
-        }
-      }
-
-      // Card/UPI with FAILED payment — no paymentId saved
-      if (["Card", "UPI"].includes(order.paymentMethod) && !order.isPaid) {
-        // Try to find the failed payment intent from Stripe
-        // by searching recent payment intents matching the order amount
-        try {
-          const paymentIntents = await stripe.paymentIntents.list({
-            limit: 100,
-          });
-
-          // Match by metadata orderId or amount + timing
-          const match = paymentIntents.data.find(
-            (pi) =>
-              pi.metadata?.dsOrderId === order._id.toString() ||
-              pi.client_reference_id === order._id.toString(),
-          );
-
-          if (match) {
-            stripeStatus = match.status;
-            if (match.last_payment_error) {
-              const err = match.last_payment_error;
-              if (err.decline_code === "insufficient_funds") {
-                failureReason = "Insufficient funds";
-              } else if (err.decline_code === "card_declined") {
-                failureReason = "Card declined";
-              } else if (err.decline_code === "lost_card") {
-                failureReason = "Lost card";
-              } else if (err.decline_code === "stolen_card") {
-                failureReason = "Stolen card";
-              } else if (err.decline_code === "expired_card") {
-                failureReason = "Card expired";
-              } else {
-                failureReason =
-                  err.message || err.decline_code || "Payment failed";
+      // ── Card / UPI ──────────────────────────────────────────
+      if (["Card", "UPI"].includes(order.paymentMethod)) {
+        // PAID — check underpaid/overpaid
+        if (order.isPaid && order.paymentResult?.paymentId) {
+          try {
+            const charges = await stripe.charges.list({
+              payment_intent: order.paymentResult.paymentId,
+              limit: 1,
+            });
+            const charge = charges.data[0];
+            if (charge) {
+              const amountPaid = charge.amount / 100;
+              const orderAmount = order.totalPrice;
+              if (amountPaid < orderAmount - 1) {
+                failureReason = `Underpaid — paid ₹${amountPaid} of ₹${orderAmount}`;
+              } else if (amountPaid > orderAmount + 1) {
+                failureReason = `Overpaid — paid ₹${amountPaid} of ₹${orderAmount}`;
               }
-            } else if (match.status === "canceled") {
-              failureReason = "Payment cancelled by user";
-            } else if (match.status === "requires_payment_method") {
-              failureReason = "Payment not completed";
             }
-          } else {
-            // No Stripe record found — user abandoned checkout
-            failureReason = "Checkout abandoned / not attempted";
+          } catch (err) {
+            // ignore
           }
-        } catch (err) {
-          failureReason = "Unable to fetch Stripe details";
+        }
+
+        // UNPAID — search payment intents by metadata
+        if (!order.isPaid) {
+          try {
+            // Search payment intents filtered by metadata order ID
+            const paymentIntents = await stripe.paymentIntents.search({
+              query: `metadata['dsOrderId']:'${order._id.toString()}'`,
+              limit: 5,
+            });
+
+            let pi = paymentIntents?.data?.[0];
+
+            // Fallback: search checkout sessions if no payment intent found
+            if (!pi) {
+              const sessions = await stripe.checkout.sessions.list({
+                limit: 100,
+              });
+              const session = sessions.data.find(
+                (s) =>
+                  s.metadata?.dsOrderId === order._id.toString() ||
+                  s.client_reference_id === order._id.toString(),
+              );
+
+              if (session?.payment_intent) {
+                pi = await stripe.paymentIntents.retrieve(
+                  session.payment_intent,
+                );
+              } else if (session?.status === "expired") {
+                failureReason = "Checkout session expired";
+              } else if (!session) {
+                failureReason = "Checkout abandoned";
+              } else {
+                failureReason = "Payment not attempted";
+              }
+            }
+
+            // Now extract failure reason from payment intent
+            if (pi) {
+              stripeStatus = pi.status;
+
+              if (pi.last_payment_error) {
+                const dc = pi.last_payment_error.decline_code;
+                const code = pi.last_payment_error.code;
+
+                const reasonMap = {
+                  insufficient_funds: "Insufficient funds",
+                  card_declined: "Card declined",
+                  lost_card: "Lost card — contact bank",
+                  stolen_card: "Stolen card — contact bank",
+                  expired_card: "Card expired",
+                  incorrect_cvc: "Incorrect CVC",
+                  incorrect_number: "Incorrect card number",
+                  processing_error: "Processing error — try again",
+                  do_not_honor: "Card blocked by bank",
+                  do_not_try_again: "Card permanently blocked",
+                  fraudulent: "Flagged as fraudulent",
+                  generic_decline: "Card declined (generic)",
+                  no_action_taken: "No action taken by bank",
+                  not_permitted: "Transaction not permitted",
+                  restricted_card: "Restricted card",
+                  revocation_of_all_authorizations: "Card revoked",
+                  security_violation: "Security violation",
+                  service_not_allowed: "Service not allowed",
+                  transaction_not_allowed: "Transaction not allowed",
+                  try_again_later: "Try again later",
+                };
+
+                if (dc && reasonMap[dc]) {
+                  failureReason = reasonMap[dc];
+                } else if (code === "payment_intent_authentication_failure") {
+                  failureReason = "Authentication failed (3D Secure)";
+                } else if (pi.last_payment_error.message) {
+                  failureReason = pi.last_payment_error.message;
+                } else {
+                  failureReason = dc || code || "Payment failed";
+                }
+              } else if (pi.status === "canceled") {
+                failureReason = "Payment cancelled by user";
+              } else if (pi.status === "requires_payment_method") {
+                failureReason = "Payment not completed";
+              } else if (pi.status === "requires_action") {
+                failureReason = "Awaiting 3D Secure authentication";
+              }
+            }
+          } catch (err) {
+            console.error("Stripe lookup error:", err.message);
+            failureReason = "Unable to fetch Stripe details";
+          }
         }
       }
 
-      // COD failure reasons
+      // ── COD ─────────────────────────────────────────────────
       if (order.paymentMethod === "COD") {
         if (order.status === "Cancelled") {
           failureReason = "Order cancelled";
