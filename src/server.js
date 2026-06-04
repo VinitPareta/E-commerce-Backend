@@ -7,6 +7,7 @@ const morgan = require("morgan");
 
 const connectDB = require("./config/db");
 const { notFound, errorHandler } = require("./middleware/errorMiddleware");
+const Chat = require("./models/Chat");
 
 const authRoutes = require("./routes/authRoutes");
 const productRoutes = require("./routes/productRoutes");
@@ -71,12 +72,8 @@ if (process.env.NODE_ENV !== "production") {
 
 app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
-// ✅ Single root route
 app.get("/", (req, res) => {
-  res.json({
-    success: true,
-    message: "DS Store backend is running.",
-  });
+  res.json({ success: true, message: "DS Store backend is running." });
 });
 
 app.get("/api", (req, res) => {
@@ -97,6 +94,134 @@ app.use("/api/users", userRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use("/api/payments", paymentRoutes);
+
+// ✅ GROQ - Outfit Complete AI
+app.post("/api/ai/outfit", async (req, res) => {
+  try {
+    const { prompt } = req.body;
+
+    const response = await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.GROQ_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are a fashion stylist AI. When given a product catalog and a selected item, respond ONLY with a valid JSON array. No markdown, no explanation, no extra text — just the raw JSON array.",
+            },
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+          max_tokens: 500,
+          temperature: 0.7,
+        }),
+      },
+    );
+
+    const data = await response.json();
+    // Return in same shape the frontend expects
+    const text = data.choices?.[0]?.message?.content || "[]";
+    res.json({ groqText: text });
+  } catch (error) {
+    console.error("Outfit AI error:", error);
+    res.status(500).json({ error: "AI request failed" });
+  }
+});
+
+// ✅ GROQ - DS Chatbot
+app.post("/api/ai/chat", async (req, res) => {
+  try {
+    const {
+      messages,
+      systemPrompt,
+      sessionId,
+      userId,
+      userName,
+      userEmail,
+      isGuest,
+      userMessage,
+    } = req.body;
+
+    const response = await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.GROQ_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...messages.map((m) => ({
+              role: m.role === "assistant" ? "assistant" : "user",
+              content: m.content,
+            })),
+          ],
+          max_tokens: 600,
+          temperature: 0.7,
+        }),
+      },
+    );
+
+    const data = await response.json();
+    const assistantReply = data.choices?.[0]?.message?.content || "";
+
+    // Save to DB
+    if (sessionId && userMessage) {
+      try {
+        const chatUpdate = await Chat.findOneAndUpdate(
+          { sessionId },
+          {
+            $set: {
+              user: userId || null,
+              userName: userName || "Guest",
+              userEmail: userEmail || "",
+              isGuest: isGuest !== false,
+              lastUserMessage: userMessage,
+            },
+            $push: {
+              messages: {
+                $each: [
+                  { role: "user", content: userMessage },
+                  { role: "assistant", content: assistantReply },
+                ],
+              },
+            },
+            $inc: { totalMessages: 2 },
+          },
+          { upsert: true, new: true },
+        );
+        console.log(
+          `Chat saved with sessionId: ${sessionId}, total messages: ${chatUpdate?.totalMessages}`,
+        );
+      } catch (dbErr) {
+        console.error("Chat DB save error:", dbErr.message);
+        // If unique constraint fails, generate new sessionId recommendation
+        if (dbErr.code === 11000) {
+          console.error(
+            "Duplicate sessionId detected - ensure unique session IDs are used",
+          );
+        }
+      }
+    }
+
+    res.json(data);
+  } catch (error) {
+    console.error("Chat error:", error);
+    res.status(500).json({ error: "Chat request failed" });
+  }
+});
 
 const clientDist = path.join(__dirname, "..", "..", "client", "dist");
 if (process.env.SERVE_CLIENT === "true" && fs.existsSync(clientDist)) {

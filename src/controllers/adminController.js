@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const Product = require("../models/Product");
 const Order = require("../models/Order");
 const User = require("../models/User");
+const Chat = require("../models/Chat");
 
 // ─── Simple in-memory cache ────────────────────────────────
 const cache = {
@@ -414,9 +415,102 @@ const getWebhookEvents = asyncHandler(async (req, res) => {
   res.json({ success: true, events });
 });
 
+// ─── Admin Chat Management ────────────────────────────────
+const getAllChats = asyncHandler(async (req, res) => {
+  const { page = 1, limit = 20, search = "" } = req.query;
+  const skip = (page - 1) * limit;
+
+  // Build search filter
+  const searchFilter = search
+    ? {
+        $or: [
+          { userName: { $regex: search, $options: "i" } },
+          { userEmail: { $regex: search, $options: "i" } },
+          { lastUserMessage: { $regex: search, $options: "i" } },
+        ],
+      }
+    : {};
+
+  const [chats, total] = await Promise.all([
+    Chat.find(searchFilter)
+      .populate("user", "name email")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit)),
+    Chat.countDocuments(searchFilter),
+  ]);
+
+  const formattedChats = chats.map((chat) => {
+    // Extract first user message and first assistant response
+    let question = "";
+    let answer = "";
+
+    for (const msg of chat.messages) {
+      if (msg.role === "user" && !question) {
+        question = msg.content;
+      }
+      if (msg.role === "assistant" && !answer) {
+        answer = msg.content;
+      }
+      if (question && answer) break;
+    }
+
+    return {
+      _id: chat._id,
+      userName: chat.userName || chat.user?.name || "Guest",
+      userEmail: chat.userEmail || chat.user?.email || "",
+      question: question || chat.lastUserMessage || "N/A",
+      answer: answer || "N/A",
+
+      messages: chat.messages,
+      totalMessages: chat.totalMessages,
+      isGuest: chat.isGuest,
+      createdAt: chat.createdAt,
+      updatedAt: chat.updatedAt,
+    };
+  });
+
+  const pages = Math.ceil(total / limit);
+
+  res.json({
+    success: true,
+    chats: formattedChats,
+    total,
+    page: parseInt(page),
+    pages,
+  });
+});
+
+// Get single chat details for viewing
+const getChatDetails = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const chat = await Chat.findById(id).populate("user", "name email");
+
+  if (!chat) {
+    return res.status(404).json({ success: false, message: "Chat not found" });
+  }
+
+  res.json({
+    success: true,
+    chat: {
+      _id: chat._id,
+      userName: chat.userName || chat.user?.name || "Guest",
+      userEmail: chat.userEmail || chat.user?.email || "",
+      messages: chat.messages,
+      totalMessages: chat.totalMessages,
+      isGuest: chat.isGuest,
+      createdAt: chat.createdAt,
+      updatedAt: chat.updatedAt,
+    },
+  });
+});
+
 module.exports = {
   getDashboardStats,
   getAdminPayments,
   getWebhookEvents,
   invalidateWebhookCache,
+  getAllChats,
+  getChatDetails,
 };
