@@ -19,6 +19,9 @@ const adminRoutes = require("./routes/adminRoutes");
 const uploadRoutes = require("./routes/uploadRoutes");
 const paymentRoutes = require("./routes/paymentRoutes");
 const { stripeWebhook } = require("./controllers/stripeController");
+const cron = require("node-cron");
+const comparisonRoutes = require("./routes/comparisonRoutes");
+const { updateAllComparisons } = require("./controllers/comparisonController");
 
 connectDB();
 
@@ -94,6 +97,21 @@ app.use("/api/users", userRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use("/api/payments", paymentRoutes);
+app.use("/api/comparison", comparisonRoutes);
+cron.schedule(
+  "0 0 * * *",
+  async () => {
+    console.log("[Cron] Starting nightly price comparison update...");
+    await updateAllComparisons();
+  },
+  {
+    timezone: "Asia/Kolkata", // Indian timezone
+  },
+);
+
+console.log(
+  "✅ Price comparison cron job scheduled — runs daily at midnight IST",
+);
 
 // ✅ GROQ - Outfit Complete AI
 app.post("/api/ai/outfit", async (req, res) => {
@@ -238,7 +256,7 @@ if (process.env.SERVE_CLIENT === "true" && fs.existsSync(clientDist)) {
 app.use(notFound);
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`DS Store server running on http://localhost:${PORT}`);
 });
